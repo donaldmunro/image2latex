@@ -2,7 +2,7 @@
 
 A cross-platform desktop application that converts images of mathematical equations  into LaTeX using LLMs. It supports direct local conversion using HuggingFace models, local and cloud conversions using Ollama models and conversion API key based conversion by commercial vision compatible models such as Gemini-Flash/GPT-4o.
 
-<img src="./_assets/image2latex-002.png" width="50%" height="50%"/>
+![image](./_assets/image2latex-002.png)
 
 ## Features
 
