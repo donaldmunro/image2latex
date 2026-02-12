@@ -2,6 +2,8 @@
 
 A cross-platform desktop application that converts images of mathematical equations  into LaTeX using LLMs. It supports direct local conversion using HuggingFace models, local and cloud conversions using Ollama models and conversion API key based conversion by commercial vision compatible models such as Gemini-Flash/GPT-4o.
 
+<img src="./_assets/image2latex-002.png" width="50%" height="50%"/>
+
 ## Features
 
 - **Multiple model backends** — Direct local inference via HuggingFace and the Rust Candle crate (fastest), local or cloud based [Ollama](https://ollama.com/download) server, or web using standard OpenAI API
