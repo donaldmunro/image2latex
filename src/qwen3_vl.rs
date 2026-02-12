@@ -283,6 +283,7 @@ impl Qwen3VL
       };
 
       // Check GPU VRAM — Qwen3-VL 2B needs ~6GB free (4GB weights + 2GB inference overhead).
+      #[cfg(any(target_os = "linux", target_os = "windows"))]
       if let Device::Cuda(_) = &device
       {
          const MIN_VRAM_BYTES: usize = 6 * 1024 * 1024 * 1024; // 6 GB
@@ -305,6 +306,14 @@ impl Qwen3VL
             }
             | Err(e) => eprintln!("Qwen3-VL: Could not query GPU memory: {:?}", e),
          }
+      }
+
+      #[cfg(target_os = "macos")]
+      if let Device::Metal(_) = &device
+      {
+         // Metal doesn't provide direct VRAM queries like CUDA
+         // macOS manages unified memory automatically
+         eprintln!("Qwen3-VL: Using Metal on macOS (unified memory)");
       }
 
       // F16 halves VRAM usage (~4GB vs ~8GB for 2B model), critical for 8GB GPUs like RTX 2070.
@@ -419,6 +428,7 @@ impl Qwen3VL
       let eos_token_id = tokenizer.token_to_id("<|im_end|>").unwrap_or(151645);
 
       // Log VRAM after model load
+      #[cfg(any(target_os = "linux", target_os = "windows"))]
       if let Device::Cuda(_) = &device
       {
          if let Ok((free, total)) = candle_core::cuda_backend::cudarc::driver::result::mem_get_info()
@@ -622,24 +632,28 @@ mod tests
    {
       let mut ids = vec![-1i32]; // CPU always available
 
-      for ordinal in 0..8u32
+      if cfg!(target_os = "macos")
       {
-         let available = if cfg!(target_os = "macos")
+         // On macOS, Metal typically only exposes device 0 (unified GPU).
+         // Candle's Metal backend panics on invalid ordinals, so only check device 0.
+         if Device::new_metal(0).is_ok()
          {
-            Device::new_metal(ordinal as usize).is_ok()
+            ids.push(0);
+         }
          }
          else
          {
-            Device::new_cuda(ordinal as usize).is_ok()
-         };
-
-         if available
+         // CUDA can have multiple devices
+         for ordinal in 0..8u32
+         {
+            if Device::new_cuda(ordinal as usize).is_ok()
          {
             ids.push(ordinal as i32);
          }
          else
          {
             break;
+            }
          }
       }
 

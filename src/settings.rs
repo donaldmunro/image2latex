@@ -21,11 +21,14 @@ pub struct Settings
    #[serde(default = "Settings::default_dark_theme")]
    pub dark_theme:                           bool,
    // #[serde(skip_serializing_if = "Option::is_none")]
-   #[serde(default = "Settings::default_openapi_key")]
-   openapi_encrypted_key:           String,
+   #[serde(default = "Settings::default_chatgpt_key")]
+   chatgpt_encrypted_key:           String,
 
-   #[serde(default = "Settings::default_openapi_key")]
+   #[serde(default = "Settings::default_gemini_key")]
    gemini_encrypted_key:            String,
+
+   #[serde(default = "Settings::default_ollama_key")]
+   ollama_encrypted_key:           String,
 }
 
 impl Default for Settings
@@ -40,8 +43,9 @@ impl Default for Settings
          last_screen_width: None,
          last_screen_height: None,
          dark_theme: Settings::default_dark_theme(),
-         openapi_encrypted_key: Settings::default_openapi_key(),
+         chatgpt_encrypted_key: Settings::default_chatgpt_key(),
          gemini_encrypted_key: Settings::default_gemini_key(),
+         ollama_encrypted_key: Settings::default_ollama_key(),
       }
    }
 }
@@ -53,19 +57,21 @@ impl Settings
 
    fn default_ollama_url() -> String { DEFAULT_OLLAMA_URL.to_string() }
 
-   pub fn default_openapi_key() -> String { "Paste your OpenAPI key here".to_string() }
+   pub fn default_chatgpt_key() -> String { "Paste your ChatGPT key here".to_string() }
 
    pub fn default_gemini_key() -> String { "Paste your Gemini API key here".to_string() }
 
+   pub fn default_ollama_key() -> String { "Paste your Ollama API key here".to_string() }
+
    fn default_dark_theme() -> bool { true }
 
-   pub fn get_encrypted_openapi_key(&self) -> Result<String, String>
+   pub fn get_encrypted_chatgpt_key(&self) -> Result<String, String>
    {
-      let value = self.openapi_encrypted_key.trim();
+      let value = self.chatgpt_encrypted_key.trim();
       match value
       {
-         "Paste your OpenAPI key here"=> Err("OpenAI API Key is not set".to_string()),
-         "" => Err("OpenAI API Key is empty".to_string()),
+         "Paste your ChatGPT key here"=> Err("ChatGPT API Key is not set".to_string()),
+         "" => Err("ChatGPT API Key is empty".to_string()),
          _ => Ok(value.to_string()),
       }
    }
@@ -81,10 +87,21 @@ impl Settings
       }
    }
 
-   pub fn has_openapi_key(&self) -> bool
+   pub fn get_encrypted_ollama_key(&self) -> Result<String, String>
    {
-      let v = self.openapi_encrypted_key.trim();
-      !v.is_empty() && v != Self::default_openapi_key()
+      let value = self.ollama_encrypted_key.trim();
+      match value
+      {
+         "Paste your Ollama API key here" => Err("Ollama API Key is not set".to_string()),
+         "" => Err("Ollama API Key is empty".to_string()),
+         _ => Ok(value.to_string()),
+      }
+   }
+
+   pub fn has_chatgpt_key(&self) -> bool
+   {
+      let v = self.chatgpt_encrypted_key.trim();
+      !v.is_empty() && v != Self::default_chatgpt_key()
    }
 
    pub fn has_gemini_key(&self) -> bool
@@ -93,14 +110,25 @@ impl Settings
       !v.is_empty() && v != Self::default_gemini_key()
    }
 
-   pub fn set_openapi_key(&mut self, encrypted_hex: String)
+   pub fn has_ollama_key(&self) -> bool
    {
-      self.openapi_encrypted_key = encrypted_hex;
+      let v = self.ollama_encrypted_key.trim();
+      !v.is_empty() && v != Self::default_ollama_key()
+   }
+
+   pub fn set_chatgpt_key(&mut self, encrypted_hex: String)
+   {
+      self.chatgpt_encrypted_key = encrypted_hex;
    }
 
    pub fn set_gemini_key(&mut self, encrypted_hex: String)
    {
       self.gemini_encrypted_key = encrypted_hex;
+   }
+
+   pub fn set_ollama_key(&mut self, encrypted_hex: String)
+   {
+      self.ollama_encrypted_key = encrypted_hex;
    }
 
    pub fn encrypt_value(plaintext: &str) -> Result<String, String>
@@ -216,8 +244,8 @@ impl Settings
       let hex_key: String;
       if !encryption_file_path.exists()
       {
-         let new_key = generate_key();
-         hex_key = hex::encode(new_key);
+         // generate_key() already returns a hex-encoded string (64 hex chars = 32 bytes)
+         hex_key = generate_key();
          match std::fs::write(&encryption_file_path, &hex_key)
          {
             | Ok(_) => (),
@@ -259,6 +287,7 @@ impl Settings
                return Err(errmsg);
             }
          };
+
       }
       Ok(hex_key)
    }

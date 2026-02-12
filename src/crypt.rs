@@ -16,15 +16,16 @@ pub fn generate_key() -> String
    hex::encode(key)
 }
 
-pub fn encrypt(password: &str, key: &str) -> Result<EncryptedData, aes_gcm::Error>
+pub fn encrypt(password: &str, key: &str) -> Result<EncryptedData, Box<dyn std::error::Error>>
 //-----------------------------------------------------------------------------------------------
 {
-   // let key = Aes256Gcm::generate_key(&mut OsRng);
-   let key_bytes = hex::decode(key).expect("Invalid hex key");
-   let cipher = Aes256Gcm::new_from_slice(&key_bytes).expect("Invalid key length");
+   let key_bytes = hex::decode(key).map_err(|e| format!("Invalid hex key: {}", e))?;
+   let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+      .map_err(|e| format!("Invalid key length ({} bytes, expected 32): {}", key_bytes.len(), e))?;
    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
-   let mut ciphertext = cipher.encrypt(&nonce, password.as_bytes())?;
+   let mut ciphertext = cipher.encrypt(&nonce, password.as_bytes())
+      .map_err(|e| format!("Encryption failed: {:?}", e))?;
    let mut result = Vec::with_capacity(nonce.len() + ciphertext.len());
    result.extend_from_slice(&nonce);
    result.append(&mut ciphertext);
@@ -35,8 +36,7 @@ pub fn encrypt(password: &str, key: &str) -> Result<EncryptedData, aes_gcm::Erro
 pub fn decrypt(data: &[u8], key: &str) -> Result<String, Box<dyn Error>>
 //---------------------------------------------------------------------------------------
 {
-   // let key = Aes256Gcm::generate_key(&mut OsRng);
-   let key_bytes = hex::decode(key).expect("Invalid hex key");
+   let key_bytes = hex::decode(key).map_err(|e| format!("Invalid hex key: {}", e))?;
    const NONCE_LEN: usize = 12; // GCM nonce size
 
    if data.len() < NONCE_LEN
@@ -44,7 +44,8 @@ pub fn decrypt(data: &[u8], key: &str) -> Result<String, Box<dyn Error>>
       return Err("Encrypted data too short".into());
    }
 
-   let cipher = Aes256Gcm::new_from_slice(&key_bytes).expect("Invalid key length");
+   let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+      .map_err(|e| format!("Invalid key length ({} bytes, expected 32): {}", key_bytes.len(), e))?;
    let (nonce_bytes, ciphertext) = data.split_at(NONCE_LEN);
    let nonce = Nonce::clone_from_slice(nonce_bytes);
 

@@ -1,7 +1,7 @@
 use image::ImageFormat;
 
-use crate::{MEDIUM_PROMPT, PROMPT, SIMPLE_PROMPT, qwen3_vl::{self, Qwen3VLVariant}, settings::Settings, status};
-use crate::llm_util::{paddleocr_vl_img_to_text, qwen3_vl_img_to_text, openai_chat_img_to_latex};
+use crate::{MEDIUM_PROMPT, PROMPT, SIMPLE_PROMPT, qwen3_vl::{self, Qwen3VLVariant}, settings::Settings};
+use crate::llm_util::{paddleocr_vl_img_to_text, qwen3_vl_img_to_text, openai_chat_img_to_latex, gemini_img_to_latex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmCategory
@@ -11,7 +11,7 @@ pub enum LlmCategory
    /// Ollama API
    Ollama,
    /// OpenAI-compatible API
-   OpenAI,
+   KeyRequired
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +69,8 @@ pub enum LLMType
    HuggingFace { model: HuggingFaceModels },
    Ollama { url: String },
    OpenAI { url: String, api_key: String },
+   Gemini { url: String, api_key: String },
+   OllamaNonFree { url: String, api_key: String },
 }
 
 #[allow(dead_code)]
@@ -88,6 +90,11 @@ impl LLMType
    {
       LLMType::OpenAI { url: url.to_string(), api_key: api_key.to_string() }
    }
+
+   pub fn new_gemini(url: &str, api_key: &str) -> Self
+   {
+      LLMType::Gemini { url: url.to_string(), api_key: api_key.to_string() }
+   }
 }
 
 impl std::fmt::Display for LLMType
@@ -99,6 +106,8 @@ impl std::fmt::Display for LLMType
          | LLMType::HuggingFace { model } => write!(f, "{:?}", model),
          | LLMType::Ollama { url } => write!(f, "Ollama ({})", url),
          | LLMType::OpenAI { url, .. } => write!(f, "OpenAI ({})", url),
+         | LLMType::Gemini { url, .. } => write!(f, "Gemini ({})", url),
+         | LLMType::OllamaNonFree { url, .. } => write!(f, "Ollama Cloud ({})", url),
       }
    }
 }
@@ -175,16 +184,39 @@ impl LLM
       }
    }
 
-   pub fn new_openai(id: &str, name: &str, url: &str, api_key: &str, sort_rank: u32) -> Self
+   pub fn new_chatgpt(id: &str, name: &str, url: &str, api_key: &str, sort_rank: u32) -> Self
    {
-      let has_key = ! api_key.to_string().trim().is_empty();
+      let has_key = ! api_key.to_string().trim().is_empty() && api_key.trim() != Settings::default_chatgpt_key();
       let fullname = if ! has_key { format!("{} (No Key)", name) } else { name.to_string() };
       Self
       {
-         info: LLMInfo::new(id.to_string(), fullname, LlmCategory::OpenAI, has_key, sort_rank),
+         info: LLMInfo::new(id.to_string(), fullname, LlmCategory::KeyRequired, has_key, sort_rank),
          typ: LLMType::OpenAI { url: url.to_string(), api_key: api_key.to_string() },
        }
    }
+
+   pub fn new_gemini(id: &str, name: &str, url: &str, api_key: &str, sort_rank: u32) -> Self
+   {
+      let has_key = !api_key.to_string().trim().is_empty() && api_key.trim() != Settings::default_gemini_key();
+      let fullname = if !has_key { format!("{} (No Key)", name) } else { name.to_string() };
+      Self
+      {
+         info: LLMInfo::new(id.to_string(), fullname, LlmCategory::KeyRequired, has_key, sort_rank),
+         typ: LLMType::Gemini { url: url.to_string(), api_key: api_key.to_string() },
+      }
+   }
+
+   pub fn new_ollama_web(id: &str, name: &str, url: &str, api_key: &str, sort_rank: u32) -> Self
+   {
+      let has_key = !api_key.to_string().trim().is_empty() && api_key.trim() != Settings::default_ollama_key();
+      let fullname = if !has_key { format!("{} (No Key)", name) } else { name.to_string() };
+      Self
+      {
+         info: LLMInfo::new(id.to_string(), fullname, LlmCategory::KeyRequired, has_key, sort_rank),
+         typ: LLMType::OllamaNonFree { url: url.to_string(), api_key: api_key.to_string() },
+      }
+   }
+   
 }
 
 impl OCR for LLM
@@ -212,11 +244,11 @@ impl OCR for LLM
          }
          | LLMType::Ollama { url } =>
          {
-            openai_chat_img_to_latex(url, "", &self.info.id, PROMPT, MEDIUM_PROMPT, SIMPLE_PROMPT, image_bytes, &ImageFormat::Png)
+            openai_chat_img_to_latex(url, "", "", &self.info.id, PROMPT, MEDIUM_PROMPT, SIMPLE_PROMPT, image_bytes, &ImageFormat::Png)
          }
          | LLMType::OpenAI { url, api_key } =>
          {
-            if api_key.trim().is_empty() || api_key.trim() == Settings::default_openapi_key()
+            if api_key.trim().is_empty() || api_key.trim() == Settings::default_chatgpt_key()
             {
                crate::status::set_status("Set a valid OpenAPI API key first");
                return Err("Set a valid OpenAPI API key first".into());
@@ -232,7 +264,49 @@ impl OCR for LLM
                      return Err(format!("Failed to decrypt OpenAPI key: {}", e).into());
                   }
                };
-               openai_chat_img_to_latex(url, &key, &self.info.id, PROMPT, MEDIUM_PROMPT, SIMPLE_PROMPT, image_bytes, &ImageFormat::Png)
+               openai_chat_img_to_latex(url, "", &key, &self.info.id, PROMPT, MEDIUM_PROMPT, SIMPLE_PROMPT, image_bytes, &ImageFormat::Png)
+            }
+         }
+         | LLMType::Gemini { url, api_key } =>
+         {
+            if api_key.trim().is_empty() || api_key.trim() == Settings::default_gemini_key()
+            {
+               crate::status::set_status("Set a valid Gemini API key first");
+               return Err("Set a valid Gemini API key first".into());
+            }
+            else
+            {
+               let key = match Settings::decrypt("Gemini", api_key)
+               {
+                  | Ok(k) => k,
+                  | Err(e) =>
+                  {
+                     crate::status::set_status(&format!("Failed to decrypt Gemini key: {}", e));
+                     return Err(format!("Failed to decrypt Gemini key: {}", e).into());
+                  }
+               };
+               gemini_img_to_latex(url, &key, PROMPT, MEDIUM_PROMPT, SIMPLE_PROMPT, image_bytes, &ImageFormat::Png)
+            }
+         }
+         | LLMType::OllamaNonFree { url, api_key } =>
+         {
+            if api_key.trim().is_empty() || api_key.trim() == Settings::default_ollama_key()
+            {
+               crate::status::set_status("Set a valid Ollama API key first");
+               return Err("Set a valid Ollama API key first".into());
+            }
+            else
+            {
+               let key = match Settings::decrypt("Ollama", api_key)
+               {
+                  | Ok(k) => k,
+                  | Err(e) =>
+                  {
+                     crate::status::set_status(&format!("Failed to decrypt Ollama key: {}", e));
+                     return Err(format!("Failed to decrypt Ollama key: {}", e).into());
+                  }
+               };
+               openai_chat_img_to_latex(url, "", &key, &self.info.id, PROMPT, MEDIUM_PROMPT, SIMPLE_PROMPT, image_bytes, &ImageFormat::Png)
             }
          }
       }

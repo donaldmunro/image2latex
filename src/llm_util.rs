@@ -110,7 +110,26 @@ pub async fn load_llms(ollama_url: &str, settings: &Settings, sort_order_start: 
    push_ollama(&mut llms, "qwen3-vl:8b", "Ollama Qwen3-vl 8B (Local)", ollama_models.contains_key("qwen3-vl:8b"));
    push_ollama(&mut llms, "qwen3-vl:235b-cloud", "Ollama Qwen3-vl 235B (Cloud)", ollama_models.contains_key("qwen3-vl:235b-cloud"));
 
-   // if let Ok(key) = std::env::var("OPENAI_API_KEY")
+   // Gemini models
+   {
+      let mut gemini_key = match std::env::var("GEMINI_API_KEY")
+      {
+         | Ok(k) => k,
+         | Err(_) => String::new(),
+      };
+      if gemini_key.trim().is_empty()
+      {
+         gemini_key = match settings.get_encrypted_gemini_key()
+         {
+            | Ok(k) => k,
+            | Err(_) => String::new(),
+         };
+      }
+      let gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent";
+      llms.push(LLM::new_gemini("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite (Web)", gemini_url, &gemini_key, sort_order_start + 1002));
+      let gemini_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+      llms.push(LLM::new_gemini("gemini-2.5-flash", "Gemini 2.5 Flash (Web)", gemini_url, &gemini_key, sort_order_start + 1003));
+   }
    {
       let mut key = match std::env::var("OPENAI_API_KEY")
       {
@@ -122,14 +141,34 @@ pub async fn load_llms(ollama_url: &str, settings: &Settings, sort_order_start: 
       };
       if key.trim().is_empty()
       {
-         key = match settings.get_encrypted_openapi_key()
+         key = match settings.get_encrypted_chatgpt_key()
          {
             | Ok(k) => k,
             | Err(_) => String::new(),
          };
       }
-      llms.push(LLM::new_openai("gpt-4o-mini", "GPT-4o Mini (Web)", "https://api.openai.com/v1/chat/completions", &key, sort_order_start + 1000));
-      llms.push(LLM::new_openai("gpt-4o", "GPT-4o (Web)", "https://api.openai.com/v1/chat/completions", &key, sort_order_start + 1001));
+      llms.push(LLM::new_chatgpt("gpt-4o-mini", "GPT-4o Mini (Web)", "https://api.openai.com/v1/chat/completions", &key, sort_order_start + 1000));
+      llms.push(LLM::new_chatgpt("gpt-4o", "GPT-4o (Web)", "https://api.openai.com/v1/chat/completions", &key, sort_order_start + 1001));
+   }
+
+   
+   // Ollama customer models via OpenAI-compatible endpoint
+   {
+      let mut ollama_key = match std::env::var("OLLAMA_API_KEY")
+      {
+         | Ok(k) => k,
+         | Err(_) => String::new(),
+      };
+      if ollama_key.trim().is_empty()
+      {
+         ollama_key = match settings.get_encrypted_ollama_key()
+         {
+            | Ok(k) => k,
+            | Err(_) => String::new(),
+         };
+      }
+      let ollama_url = "https://ollama.com/api";
+      llms.push(LLM::new_ollama_web("qwen3-vl", "Ollama (Paid) Qwen 3VL 235B (Web)", ollama_url, &ollama_key, sort_order_start + 1004));
    }
    llms
 }
@@ -199,9 +238,8 @@ pub async fn get_ollama_models(url: &str) -> Result<HashMap<String, OllamaModelL
 
 /// Unified OpenAI-compatible image-to-LaTeX function.
 /// Works with both Ollama (/v1/chat/completions) and OpenAI-compatible APIs.
-pub fn openai_chat_img_to_latex(url: &str, api_key: &str, model: &str, prompt: &str, medium_prompt: &str, simple_prompt: &str,
-                                image: &[u8], image_format: &ImageFormat)
-                                -> Result<String, Box<dyn std::error::Error + Send + Sync>>
+pub fn openai_chat_img_to_latex(url: &str, api_key_header: &str, api_key: &str, model: &str, prompt: &str, medium_prompt: &str, 
+   simple_prompt: &str, image: &[u8], image_format: &ImageFormat) -> Result<String, Box<dyn std::error::Error + Send + Sync>>
 //--------------------------------------------------------------------------------
 {
    let prompts = [prompt.to_string(), medium_prompt.to_string(), simple_prompt.to_string()];
@@ -245,7 +283,16 @@ pub fn openai_chat_img_to_latex(url: &str, api_key: &str, model: &str, prompt: &
       let mut req = agent.post(url).header("Content-Type", "application/json;charset=UTF-8");
       if !api_key.is_empty()
       {
-         req = req.header("Authorization", &format!("Bearer {}", api_key));
+         let header_key = if api_key_header.trim().is_empty() { "Authorization" } else { api_key_header };
+         if header_key == "Authorization" && !api_key.starts_with("Bearer ") && !api_key.starts_with("Basic ") && !api_key.starts_with("Token ")
+         {
+            req = req.header(header_key, &format!("Bearer {}", api_key));
+         }
+         else
+         {
+            req = req.header(header_key, api_key);
+         }
+         // req = req.header("Authorization", &format!("Bearer {}", api_key));
       }
 
       let mut response = match req.send(&request_text)
@@ -305,6 +352,145 @@ pub fn openai_chat_img_to_latex(url: &str, api_key: &str, model: &str, prompt: &
    if latex_text.trim().is_empty()
    {
       return Err("API returned empty response".to_string().into());
+   }
+   Ok(latex_text)
+}
+
+/// Gemini generateContent response types
+#[derive(Debug, Deserialize)]
+struct GeminiPart
+{
+   text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiContent
+{
+   parts: Vec<GeminiPart>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiCandidate
+{
+   content: GeminiContent,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiResponse
+{
+   candidates: Option<Vec<GeminiCandidate>>,
+}
+
+/// Gemini native API image-to-LaTeX function.
+/// Uses the Gemini generateContent endpoint with inline_data for images
+/// and x-goog-api-key header for authentication.
+pub fn gemini_img_to_latex(url: &str, api_key: &str, prompt: &str, medium_prompt: &str, simple_prompt: &str,
+                           image: &[u8], image_format: &ImageFormat)
+                           -> Result<String, Box<dyn std::error::Error + Send + Sync>>
+//--------------------------------------------------------------------------------
+{
+   let prompts = [prompt.to_string(), medium_prompt.to_string(), simple_prompt.to_string()];
+   fn trim_non_ascii(s: &str) -> String { s.chars().filter(|&c| c.is_ascii()).collect() }
+
+   let mime = match image_format
+   {
+      | ImageFormat::Png => "image/png",
+      | ImageFormat::Jpeg => "image/jpeg",
+      | _ => "image/png",
+   };
+   let image_b64 = general_purpose::STANDARD.encode(image);
+
+   let mut latex_text = String::new();
+   for (i, prompt) in prompts.iter().enumerate()
+   {
+      let request = serde_json::json!({
+         "contents": [{
+            "parts": [
+               { "text": prompt },
+               { "inline_data": { "mime_type": mime, "data": &image_b64 } }
+            ]
+         }]
+      });
+
+      let request_text = match serde_json::to_string(&request)
+      {
+         | Ok(s) => s,
+         | Err(e) =>
+         {
+            let msg = format!("ERROR: Serializing Gemini request to JSON failed: {e}");
+            return Err(msg.into());
+         }
+      };
+
+      let full_url = if url.contains('?') { format!("{}&key={}", url, api_key) } else { format!("{}?key={}", url, api_key) };
+
+      let config = Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(150))).build();
+      let agent = Agent::new_with_config(config);
+      let req = agent.post(&full_url).header("Content-Type", "application/json;charset=UTF-8");
+
+      let mut response = match req.send(&request_text)
+      {
+         | Ok(r) => r,
+         | Err(e) =>
+         {
+            let msg = format!("ERROR: Submitting request to Gemini: {}", e);
+            eprintln!("{}", &msg);
+            return Err(msg.into());
+         }
+      };
+
+      if !response.status().is_success()
+      {
+         let body = response.body_mut().read_to_string().unwrap_or_default();
+         if i == prompts.len() - 1
+         {
+            return Err(format!("Gemini API returned error {}: {}", response.status(), body).into());
+         }
+         continue;
+      }
+
+      let response_text = match response.body_mut().read_to_string()
+      {
+         | Ok(s) => s,
+         | Err(e) =>
+         {
+            let msg = format!("ERROR: Reading Gemini response body failed: {e}");
+            return Err(msg.into());
+         }
+      };
+
+      let gemini_response: GeminiResponse = match serde_json::from_str(&response_text)
+      {
+         | Ok(r) => r,
+         | Err(e) =>
+         {
+            eprintln!("Gemini API returned JSON deserialize error: {}", e);
+            if i == prompts.len() - 1
+            {
+               return Err(format!("Gemini JSON error: {}", e).into());
+            }
+            continue;
+         }
+      };
+
+      latex_text = gemini_response.candidates
+         .and_then(|c| c.into_iter().next())
+         .map(|c| c.content.parts.iter()
+                     .filter_map(|p| p.text.as_deref())
+                     .collect::<Vec<_>>()
+                     .join(""))
+         .unwrap_or_default()
+         .trim()
+         .to_string();
+
+      if !trim_non_ascii(latex_text.trim()).is_empty()
+      {
+         break;
+      }
+   }
+   if latex_text.trim().is_empty()
+   {
+      return Err("Gemini API returned empty response".to_string().into());
    }
    Ok(latex_text)
 }

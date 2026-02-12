@@ -21,13 +21,22 @@ dirs = "6.0.0"
 
 # Candle ML dependencies for TrOCR and PaddleOCR-VL
 # Use local candle-transformers for PaddleOCR-VL support
-candle-core = { path = ".extern/candle-main/candle-core", features = ["cuda", "cudnn"]  }
-candle-nn = { path = ".extern/candle-main/candle-nn", features = ["cuda", "cudnn"]  }
-candle-transformers = { path = ".extern/candle-main/candle-transformers", features = ["cuda", "cudnn"]  }
 hf-hub = { version = "0.4", features = ["tokio"] }
 tokenizers = "0.21"
 sysinfo = "0.38.0"
 pastey = "0.2.1"
+
+# Linux and Windows: CUDA support
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+candle-core = { path = ".extern/candle-main/candle-core", features = ["cuda", "cudnn"] }
+candle-nn = { path = ".extern/candle-main/candle-nn", features = ["cuda", "cudnn"] }
+candle-transformers = { path = ".extern/candle-main/candle-transformers", features = ["cuda", "cudnn"] }
+
+# macOS: Metal support
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { path = ".extern/candle-main/candle-core", features = ["metal"] }
+candle-nn = { path = ".extern/candle-main/candle-nn", features = ["metal"] }
+candle-transformers = { path = ".extern/candle-main/candle-transformers", features = ["metal"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.4", features = ["wayland-data-control"] }

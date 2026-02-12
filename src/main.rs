@@ -21,7 +21,7 @@ mod qwen3_vl;
 mod status;
 
 use crate::settings::Settings;
-use crate::llm::{LLM, LlmCategory, OCR};
+use crate::llm::{LLM, LLMType, LlmCategory, OCR};
 use crate::llm_util::{load_available_models, clear_model_caches, extract_math};
 
 //Less sophisticated models appear to not understand what Markdown or Latex is and just return an empty string.
@@ -174,15 +174,35 @@ fn mac_gpus() -> Vec<String>
    names
 }
 
-/// Get GPU names on Linux/Windows by running `nvidia-smi -L`.
-/// Returns a list of GPU names (without GPU ID or UUID).
+/// Determine NVIDIA architecture from the GPU name.
+fn gpu_architecture(name: &str) -> &'static str
+{
+   let upper = name.to_uppercase();
+   // Blackwell: RTX 50xx
+   if upper.contains("RTX 50") { return "Blackwell"; }
+   // Ada Lovelace: RTX 40xx
+   if upper.contains("RTX 40") || upper.contains("L40") || upper.contains("L4 ") { return "Ada"; }
+   // Ampere: RTX 30xx, A100, A10, A30, A40, A6000
+   if upper.contains("RTX 30") || upper.contains("RTX A") || upper.contains(" A100") || upper.contains(" A10") || upper.contains(" A30") || upper.contains(" A40") { return "Ampere"; }
+   // Turing: RTX 20xx, GTX 16xx
+   if upper.contains("RTX 20") || upper.contains("GTX 16") { return "Turing"; }
+   // Pascal: GTX 10xx
+   if upper.contains("GTX 10") || upper.contains("GP10") || upper.contains("P100") || upper.contains("P40") { return "Pascal"; }
+   // Hopper
+   if upper.contains("H100") || upper.contains("H200") { return "Hopper"; }
+   ""
+}
+
+/// Get GPU names, memory, and architecture on Linux/Windows by running `nvidia-smi`.
+/// Returns a list of GPU description strings (without GPU ID).
+///
+/// Parses the nvidia-smi table output. The GPU data section follows the `|===...===|`
+/// separator. Each GPU has 3 data rows:
+///   Row 0: GPU index + name + persistence-mode | bus-id + disp | ECC
+///   Row 1: fan + temp + perf + power | memory-usage | gpu-util + compute
+///   Row 2: (empty/MIG row)
 fn cuda_gpus() -> Vec<String>
 {
-   // Example output:
-   //
-   // GPU 0: NVIDIA GeForce RTX 4070 Ti (UUID: GPU-c2411abb-166e-8cd9-8526-faa675b3c138)
-   // GPU 1: NVIDIA GeForce RTX 2070 (UUID: GPU-b66c3a83-05cb-3d85-30bb-be1fe4922f40)
-   //
    let known_paths: &[&str] = if cfg!(target_os = "windows")
    {
       &[r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
@@ -197,7 +217,7 @@ fn cuda_gpus() -> Vec<String>
       return Vec::new();
    };
 
-   let Ok(output) = std::process::Command::new(&exe).arg("-L").output() else {
+   let Ok(output) = std::process::Command::new(&exe).output() else {
       return Vec::new();
    };
 
@@ -207,28 +227,98 @@ fn cuda_gpus() -> Vec<String>
    }
 
    let stdout = String::from_utf8_lossy(&output.stdout);
+   let lines: Vec<&str> = stdout.lines().collect();
+
+   // Find the |===...===| separator that marks the start of GPU data
+   let Some(eq_idx) = lines.iter().position(|l| { let t = l.trim(); t.starts_with("|=") && t.contains("===") }) else {
+      return Vec::new();
+   };
+
+   // Collect GPU data rows (|...|) after the separator, stopping at a blank line
+   let mut gpu_data: Vec<&str> = Vec::new();
+   for line in &lines[eq_idx + 1..]
+   {
+      let t = line.trim();
+      if t.is_empty() { break; }
+      if t.starts_with('|') && !t.starts_with("|=")
+      {
+         gpu_data.push(t);
+      }
+      // +--- separator lines between GPUs are skipped
+   }
+
    let mut names = Vec::new();
 
-   for line in stdout.lines()
+   // Each GPU occupies 3 data rows
+   for chunk in gpu_data.chunks(3)
    {
-      let trimmed = line.trim();
-      // Format: "GPU 0: NVIDIA GeForce RTX 4070 Ti (UUID: GPU-...)"
-      // Extract the name between ": " and " (UUID:"
-      if let Some(colon_pos) = trimmed.find(": ")
+      if chunk.is_empty() { continue; }
+
+      // Row 0: "|   0  NVIDIA GeForce RTX 4070 Ti     Off |   00000000:01:00.0  On |   N/A |"
+      let cells0: Vec<&str> = chunk[0].split('|').collect();
+      let mut gpu_name = String::new();
+      if cells0.len() > 1
       {
-         let after_colon = &trimmed[colon_pos + 2..];
-         let name = if let Some(uuid_pos) = after_colon.find(" (UUID:")
+         let first_cell = cells0[1].trim();
+         // Format: "0  NVIDIA GeForce RTX 4070 Ti     Off"
+         // Split on whitespace, skip the index, strip trailing "Off"/"On" (persistence mode)
+         let parts: Vec<&str> = first_cell.split_whitespace().collect();
+         if parts.len() >= 2
          {
-            &after_colon[..uuid_pos]
+            let end = if parts.last().map(|s| *s == "Off" || *s == "On").unwrap_or(false)
+            {
+               parts.len() - 1
+            }
+            else
+            {
+               parts.len()
+            };
+            gpu_name = parts[1..end].join(" ");
          }
-         else
+      }
+
+      // Row 1: "|  0%   45C    P8   15W / 285W |    1157MiB / 12282MiB |  14%  Default |"
+      let mut memory_info = String::new();
+      if chunk.len() > 1
+      {
+         let cells1: Vec<&str> = chunk[1].split('|').collect();
+         if cells1.len() > 2
          {
-            after_colon.trim()
-         };
-         if !name.is_empty()
-         {
-            names.push(name.to_string());
+            // Second cell: "    1157MiB / 12282MiB"
+            let mem_cell = cells1[2].trim();
+            if let Some(slash_pos) = mem_cell.find('/')
+            {
+               let total = mem_cell[slash_pos + 1..].trim().replace("MiB", "");
+               let total = total.trim();
+               if let Ok(mib) = total.parse::<f64>()
+               {
+                  let gb = mib / 1024.0;
+                  if gb >= 1.0
+                  {
+                     memory_info = format!("{:.1}GB", gb);
+                  }
+                  else
+                  {
+                     memory_info = format!("{}MiB", total);
+                  }
+               }
+            }
          }
+      }
+
+      if !gpu_name.is_empty()
+      {
+         let arch = gpu_architecture(&gpu_name);
+         let mut desc = gpu_name;
+         if !memory_info.is_empty()
+         {
+            desc = format!("{} {}", desc, memory_info);
+         }
+         if !arch.is_empty()
+         {
+            desc = format!("{} ({})", desc, arch);
+         }
+         names.push(desc);
       }
    }
 
@@ -244,51 +334,33 @@ fn enumerate_gpus() -> Vec<String>
    let mut ids: Vec<usize> = Vec::new();
 
    // Probe for available GPU devices via Candle
-   for id in 0..64
+   if cfg!(target_os = "macos")
    {
-      let available = if cfg!(target_os = "macos")
+      // On macOS, Metal typically only exposes device 0 (unified GPU),
+      // even on multi-GPU systems. Candle's Metal backend panics on invalid
+      // ordinals instead of returning an error, so we only probe device 0.
+      if let Ok(_) = Device::new_metal(0)
       {
-         match Device::new_metal(id)
-         {
-            | Ok(_) => true,
-            | Err(e) =>
-            {
-               // If we get an "invalid device ordinal" error, stop probing further
-               if e.to_string().to_lowercase().contains("invalid device ordinal")
-               {
-                  break;
-               }
-               else
-               {
-                  eprintln!("Error {} probing Metal device {}: {:?}", e.to_string(), id, e);
-                  false
-               }
-            }
+         ids.push(0);
          }
       }
       else
+   {
+      // CUDA can have multiple devices, probe up to 64
+      for id in 0..64
       {
          match Device::new_cuda(id)
          {
-            | Ok(_) => true,
+            | Ok(_) => ids.push(id),
             | Err(e) =>
             {
                if ! e.to_string().to_lowercase().contains("invalid device ordinal")
                {
                   eprintln!("Error {} probing CUDA device {}: {:?}",e.to_string(), id, e);
                }
-               false
+               break;
             }
          }
-      };
-
-      if available
-      {
-         ids.push(id);
-      }
-      else
-      {
-         break;
       }
    }
 
@@ -364,10 +436,13 @@ struct App
    status_text:         String,
    dark_theme:          bool,
    show_settings:       bool,
+   settings_ollama_url: String,
    settings_openai_key: String,
    settings_gemini_key: String,
+   settings_ollama_key: String,
    show_openai_key:     bool,
    show_gemini_key:     bool,
+   show_ollama_key:     bool,
    settings_status:     String,
 }
 
@@ -401,10 +476,13 @@ impl Default for App
              status_text: String::new(),
              dark_theme,
              show_settings: false,
+             settings_ollama_url: String::new(),
              settings_openai_key: String::new(),
              settings_gemini_key: String::new(),
+             settings_ollama_key: String::new(),
              show_openai_key: false,
              show_gemini_key: false,
+             show_ollama_key: false,
              settings_status: String::new() }
    }
 }
@@ -430,10 +508,13 @@ enum Message
    WindowResized(iced::Size),
    OpenSettings,
    CloseSettings,
+   SettingsOllamaUrlChanged(String),
    SettingsOpenAIKeyChanged(String),
    SettingsGeminiKeyChanged(String),
+   SettingsOllamaKeyChanged(String),
    ToggleShowOpenAIKey,
    ToggleShowGeminiKey,
+   ToggleShowOllamaKey,
    ToggleDarkTheme(bool),
    SaveSettings,
 }
@@ -442,6 +523,7 @@ impl App
 {
    fn update(&mut self, message: Message) -> Task<Message>
    {
+      let msg: String;
       match message
       {
          | Message::ToggleMonitor(value) =>
@@ -505,13 +587,14 @@ impl App
             Task::none()
          }
          | Message::ModelSelected(model) =>
-         {
+         {            
             if !model.info.is_available
             {
+               msg = format!("{} API key is not set. Configure it in Settings or set the corresponding environment variable.", model.info.name);
                let reason = match model.info.category
                {
-                  | LlmCategory::Ollama => "Ollama is not running or this model is not installed. Start Ollama and pull the model, then refresh.",
-                  | LlmCategory::OpenAI => "OpenAI API key is not set. Set the OPENAI_API_KEY environment variable.",
+                  | LlmCategory::Ollama => "Ollama is not running or this model is not installed. Start Ollama and/or pull/run the model, then click refresh.",
+                  | LlmCategory::KeyRequired => &msg,
                   | LlmCategory::HuggingFace => "This model is not available. It may need to be downloaded first.",
                };
                self.is_error = true;
@@ -695,19 +778,30 @@ impl App
          | Message::OpenSettings =>
          {
             self.show_settings = true;
+            let settings = Settings::new().get_settings_or_default();
+            self.settings_ollama_url = settings.ollama_url;
             self.settings_openai_key.clear();
             self.settings_gemini_key.clear();
+            self.settings_ollama_key.clear();
             self.show_openai_key = false;
             self.show_gemini_key = false;
+            self.show_ollama_key = false;
             self.settings_status.clear();
             Task::none()
          }
          | Message::CloseSettings =>
          {
             self.show_settings = false;
+            self.settings_ollama_url.clear();
             self.settings_openai_key.clear();
             self.settings_gemini_key.clear();
+            self.settings_ollama_key.clear();
             self.settings_status.clear();
+            Task::none()
+         }
+         | Message::SettingsOllamaUrlChanged(value) =>
+         {
+            self.settings_ollama_url = value;
             Task::none()
          }
          | Message::SettingsOpenAIKeyChanged(value) =>
@@ -730,6 +824,16 @@ impl App
             self.show_gemini_key = !self.show_gemini_key;
             Task::none()
          }
+         | Message::SettingsOllamaKeyChanged(value) =>
+         {
+            self.settings_ollama_key = value;
+            Task::none()
+         }
+         | Message::ToggleShowOllamaKey =>
+         {
+            self.show_ollama_key = !self.show_ollama_key;
+            Task::none()
+         }
          | Message::ToggleDarkTheme(value) =>
          {
             self.dark_theme = value;
@@ -741,6 +845,14 @@ impl App
          | Message::SaveSettings =>
          {
             let mut settings = Settings::new().get_settings_or_default();
+            settings.ollama_url = if self.settings_ollama_url.trim().is_empty()
+            {
+               llm_util::DEFAULT_OLLAMA_URL.to_string()
+            }
+            else
+            {
+               self.settings_ollama_url.trim().to_string()
+            };
             let openai_key = self.settings_openai_key.trim();
             let gemini_key = self.settings_gemini_key.trim();
 
@@ -748,7 +860,7 @@ impl App
             {
                match Settings::encrypt_value(openai_key)
                {
-                  | Ok(encrypted) => settings.set_openapi_key(encrypted),
+                  | Ok(encrypted) => settings.set_chatgpt_key(encrypted),
                   | Err(e) =>
                   {
                      self.settings_status = format!("Error encrypting OpenAI key: {}", e);
@@ -768,13 +880,56 @@ impl App
                   }
                }
             }
+            let ollama_key = self.settings_ollama_key.trim();
+            if !ollama_key.is_empty()
+            {
+               match Settings::encrypt_value(ollama_key)
+               {
+                  | Ok(encrypted) => settings.set_ollama_key(encrypted),
+                  | Err(e) =>
+                  {
+                     self.settings_status = format!("Error encrypting Ollama key: {}", e);
+                     return Task::none();
+                  }
+               }
+            }
             match settings.write_settings()
             {
                | Ok(_) =>
                {
                   self.settings_status = "Settings saved successfully".to_string();
+
+                  // Update is_available and stored api_key on models whose key was just entered
+                  let entered_openai = !self.settings_openai_key.trim().is_empty();
+                  let entered_gemini = !self.settings_gemini_key.trim().is_empty();
+                  let entered_ollama = !self.settings_ollama_key.trim().is_empty();
+
+                  for llm in &mut self.models
+                  {
+                     let new_key = match &llm.typ
+                     {
+                        | LLMType::OpenAI { .. } if entered_openai => settings.get_encrypted_chatgpt_key().ok(),
+                        | LLMType::Gemini { .. } if entered_gemini => settings.get_encrypted_gemini_key().ok(),
+                        | LLMType::OllamaNonFree { .. } if entered_ollama => settings.get_encrypted_ollama_key().ok(),
+                        | _ => None,
+                     };
+                     if let Some(key) = new_key
+                     {
+                        match &mut llm.typ
+                        {
+                           | LLMType::OpenAI { api_key, .. }
+                           | LLMType::Gemini { api_key, .. }
+                           | LLMType::OllamaNonFree { api_key, .. } => *api_key = key,
+                           | _ => {}
+                        }
+                        llm.info.is_available = true;
+                        llm.info.name = llm.info.name.trim_end_matches(" (No Key)").to_string();
+                     }
+                  }
+
                   self.settings_openai_key.clear();
                   self.settings_gemini_key.clear();
+                  self.settings_ollama_key.clear();
                }
                | Err(e) =>
                {
@@ -1025,7 +1180,11 @@ impl App
       {
          let settings = Settings::new().get_settings_or_default();
 
-         let openai_placeholder = if settings.has_openapi_key() { "Key is set (enter new to replace)" } else { "Enter OpenAI API key" };
+         let ollama_input = text_input(llm_util::DEFAULT_OLLAMA_URL, &self.settings_ollama_url)
+            .on_input(Message::SettingsOllamaUrlChanged)
+            .width(Length::Fill);
+
+         let openai_placeholder = if settings.has_chatgpt_key() { "Key is set (enter new to replace)" } else { "Enter OpenAI API key" };
          let gemini_placeholder = if settings.has_gemini_key() { "Key is set (enter new to replace)" } else { "Enter Gemini API key" };
 
          let openai_input = text_input(openai_placeholder, &self.settings_openai_key)
@@ -1046,6 +1205,16 @@ impl App
             .spacing(10)
             .align_y(Alignment::Center);
 
+         let ollama_key_placeholder = if settings.has_ollama_key() { "Key is set (enter new to replace)" } else { "Enter Ollama API key" };
+         let ollama_key_input = text_input(ollama_key_placeholder, &self.settings_ollama_key)
+            .on_input(Message::SettingsOllamaKeyChanged)
+            .secure(!self.show_ollama_key)
+            .width(Length::Fill);
+         let show_ollama_label = if self.show_ollama_key { "Hide" } else { "Show" };
+         let ollama_key_row = row![ollama_key_input, button(show_ollama_label).on_press(Message::ToggleShowOllamaKey)]
+            .spacing(10)
+            .align_y(Alignment::Center);
+
          let theme_checkbox = checkbox("Dark Theme", self.dark_theme).on_toggle(Message::ToggleDarkTheme);
 
          let button_row = row![iced::widget::Space::with_width(Length::Fill),
@@ -1054,10 +1223,14 @@ impl App
             .spacing(10);
 
          let mut dialog_column = column![text("Settings").size(20),
+                                         text("Ollama URL").size(14),
+                                         ollama_input,
                                          text("OpenAI API Key").size(14),
                                          openai_row,
                                          text("Gemini API Key").size(14),
                                          gemini_row,
+                                         text("Ollama Paid Web API Key (https://ollama.com/api)").size(14),
+                                         ollama_key_row,
                                          theme_checkbox,
                                          button_row]
             .spacing(10)
